@@ -2,3 +2,4 @@ data/
 environment.yml
 __pycache__/
 .ipynb_checkpoints/
+project_old.ipynb
