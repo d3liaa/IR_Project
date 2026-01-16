@@ -20,51 +20,59 @@ This project focuses on cross-lingual Information Retrieval using the SWIM-IR da
          tar.extractall(path=extract_path)
      ```
 
-## Environment Setup
-
-To set up the environment for this project, follow these steps:
-
-1. **Install Conda**:
-   - If you don't have Conda installed, download and install it from [Conda's official website](https://docs.conda.io/en/latest/miniconda.html).
-
-2. **Create the Environment**:
-   - Use the provided `environment.yml` file to create the environment:
-     ```bash
-     conda env create -f environment.yml
-     ```
-
-3. **Activate the Environment**:
-   - Activate the newly created environment:
-     ```bash
-     conda activate ir_project
-     ```
-
-4. **Install Additional Dependencies** (if needed):
-   - If you encounter missing dependencies, install them using pip or conda. For example:
-     ```bash
-     pip install <package_name>
-     ```
 
 ## Project Structure
 
 - `data/`: Contains the SWIM-IR dataset.
 - `project.ipynb`: Jupyter notebook for data exploration and model implementation.
+- `interface.py`: Web interface for querying the retrieval system.
 - `environment.yml`: Conda environment configuration file.
+- `artifacts_cache_bm25/`: Cached BM25 scores from notebook evaluation.
+- `artifacts_cache_dense/`: Cached dense retrieval scores from notebook evaluation.
+- `df_results_frozen_*.pkl`: Saved evaluation results with tuned hyperparameters.
 - `README.md`: Project documentation.
 
 ## Running the Project
 
+### 1. Jupyter Notebook (for evaluation and analysis)
+
 1. Open the Jupyter notebook:
    ```bash
    jupyter notebook project.ipynb
+    ```bash
+
+### 2. Web Interface (for querying)
+
+1. make sure the right env is activated 
+   ```bash
+   conda activate ir_project
+   ```
+2. Install required dependencies for the web interface:
+   ```bash
+   pip install sentence-transformers rank_bm25 faiss-cpu gradio pandas jieba
+   conda install numpy=1.26.4 scipy scikit-learn
+   ```
+3. Launch the web interface:
+   ```bash
+   python interface.py
    ```
 
-2. Follow the steps in the notebook to load the dataset, preprocess the data, and implement the retrieval model.
+The interface will initialize (this takes 2-5 minutes on first run):
+
+Loading LaBSE model
+Loading 1000 documents per language
+Building BM25 indices
+Loading/computing document embeddings
+Once ready, you'll see:
+
+* Running on local URL:  .... 
+
+THE FIRST SEARCH WILL TAKE A LOT BUT THEN ITS PREATTY QUICK
 
 ## Authors
 - Delia Mennitti - 19610
-- Letizia Meroi
-- Sara Napolitano
+- Letizia Meroi - 19041
+- Sara Napolitano - 24656
 
 ## References
 - [SWIM-IR Dataset](https://github.com/google-research-datasets/swim-ir)
