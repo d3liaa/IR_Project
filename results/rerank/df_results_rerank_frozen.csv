@@ -1,0 +1,9 @@
+split,language,Recall@10,MRR@10,method,alpha,candN,rerankK,rerank_model,device,max_length,doc_trunc_chars,batch_size
+cross_lingual,de,0.815,0.743125,Hybrid(tuned)+Rerank(amberoad-mBERT),0.2,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+cross_lingual,fr,0.755,0.7158888888888889,Hybrid(tuned)+Rerank(amberoad-mBERT),0.2,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+cross_lingual,es,0.835,0.769047619047619,Hybrid(tuned)+Rerank(amberoad-mBERT),0.2,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+cross_lingual,zh,0.62,0.5466507936507936,Hybrid(tuned)+Rerank(amberoad-mBERT),0.30000000000000004,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+monolingual,de,0.935,0.921875,Hybrid(tuned)+Rerank(amberoad-mBERT),0.30000000000000004,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+monolingual,fr,0.905,0.875,Hybrid(tuned)+Rerank(amberoad-mBERT),0.2,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+monolingual,es,0.965,0.9371309523809523,Hybrid(tuned)+Rerank(amberoad-mBERT),0.30000000000000004,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
+monolingual,en,0.95,0.94,Hybrid(tuned)+Rerank(amberoad-mBERT),0.6000000000000001,500,100,amberoad/bert-multilingual-passage-reranking-msmarco,cpu,256,400,8
