@@ -45,7 +45,7 @@ This project focuses on cross-lingual Information Retrieval using the SWIM-IR da
 
 1. make sure the right env is activated 
    ```bash
-   conda activate ir_project
+   conda activate ir_env
    ```
 2. Install required dependencies for the web interface:
    ```bash
