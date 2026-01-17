@@ -24,9 +24,9 @@ PROJECT_DIR = Path(__file__).parent
 DATA_DIR = PROJECT_DIR / "data" / "swim_ir_v1" / "swim_ir_v1"
 BASE_DATA_DIR = str(DATA_DIR)
 
-LANGUAGES = ["en", "de", "es", "fr", "zh"]  # Same as SELECTED_LANGUAGES in notebook
+LANGUAGES = ["en", "de", "es", "fr"]  # Removed zh - only has cross-lingual (non-English docs)
 K = 10  # Same as notebook
-MAX_ITEMS = 1000  # Same as notebook
+MAX_ITEMS = 10000  # Same as notebook
 
 # Tokenization - same as notebook
 def tokenize(text: str, lang_code: str) -> List[str]:
@@ -72,7 +72,9 @@ class IRSystem:
     
     def _load_language_data(self, lang: str):
         """Load documents and build indices (same as notebook BM25 cell)."""
-        # Use monolingual split for interface (you can change to cross_lingual if needed)
+        # Use monolingual split - documents are in target language
+        # This enables true cross-lingual: English query → target language docs
+        # (LaBSE model handles the cross-lingual matching)
         doc_path = DATA_DIR / "monolingual" / lang / "train.jsonl"
         
         if not doc_path.exists():
@@ -158,12 +160,12 @@ class IRSystem:
     
     def _load_best_alphas(self):
         """Load best alpha values from notebook hybrid tuning if available."""
-        # Try to load from saved results
-        frozen_file = PROJECT_DIR / "df_results_frozen_20260113_142955.pkl"
+        # Try to load from CSV file (more compatible than pickle)
+        csv_file = PROJECT_DIR / "results" / "rerank" / "df_results_rerank_frozen.csv"
         
-        if frozen_file.exists():
+        if csv_file.exists():
             try:
-                df = pd.read_pickle(frozen_file)
+                df = pd.read_csv(csv_file)
                 hybrid_results = df[df['method'] == 'Hybrid(tuned)']
                 
                 for _, row in hybrid_results.iterrows():
@@ -284,6 +286,12 @@ class IRSystem:
         doc_embeddings = self.doc_embeddings[language]
         query_emb_2d = query_embedding.reshape(1, -1)
         dense_scores = cosine_similarity(query_emb_2d, doc_embeddings)[0]
+        
+        # Ensure both score arrays have the same length
+        # This handles cases where embeddings were cached with different MAX_ITEMS
+        min_len = min(len(bm25_scores), len(dense_scores))
+        bm25_scores = bm25_scores[:min_len]
+        dense_scores = dense_scores[:min_len]
         
         # Normalize scores (same as notebook lines 1050-1058)
         bm25_min, bm25_max = bm25_scores.min(), bm25_scores.max()
@@ -409,7 +417,7 @@ def main():
                 ["Wie funktioniert künstliche Intelligenz?", "de", "Hybrid (α tuned)"],
                 ["¿Cuáles son los efectos del cambio climático?", "es", "BM25 only"],
                 ["Comment préparer une recette traditionnelle?", "fr", "Dense only (LaBSE)"],
-                ["什么是机器学习?", "zh", "Hybrid (α tuned)"],
+                ["什么是机器学习?", "en", "Hybrid (α tuned)"],
             ],
             inputs=[query_input, language_dropdown, method_dropdown],
             label="📝 Example Queries"
