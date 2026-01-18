@@ -3,3 +3,5 @@ environment.yml
 __pycache__/
 .ipynb_checkpoints/
 project_old.ipynb
+artifacts_cache_bm25/
+artifacts_cache_dense/
