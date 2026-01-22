@@ -9,11 +9,13 @@ import json
 import pickle
 import os
 import ast  # Added for Python dict format parsing
+import re
 from pathlib import Path
 import gradio as gr
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder
 from sklearn.metrics.pairwise import cosine_similarity
 from rank_bm25 import BM25Okapi
 import jieba
@@ -24,9 +26,13 @@ PROJECT_DIR = Path(__file__).parent
 DATA_DIR = PROJECT_DIR / "data" / "swim_ir_v1" / "swim_ir_v1"
 BASE_DATA_DIR = str(DATA_DIR)
 
-LANGUAGES = ["en", "de", "es", "fr"]  # Removed zh - only has cross-lingual (non-English docs)
+DOC_LANGUAGES = ["en", "de", "es", "fr"]  # Monolingual docs available here
+QUERY_LANGUAGES = ["en", "de", "es", "fr", "zh"]  # Query language can be non-English
 K = 10  # Same as notebook
 MAX_ITEMS = 10000  # Same as notebook
+K_RERANK = 100  # Candidate pool for reranking (same idea as notebook)
+RERANK_MODEL = "amberoad/bert-multilingual-passage-reranking-msmarco"
+RERANK_MAX_LEN = 256
 
 # Tokenization - same as notebook
 def tokenize(text: str, lang_code: str) -> List[str]:
@@ -34,7 +40,10 @@ def tokenize(text: str, lang_code: str) -> List[str]:
     if lang_code == "zh":
         return list(jieba.cut(text))
     else:
-        return text.lower().split()
+        text = text.lower()
+        # Remove punctuation and split on word boundaries (more robust for ES/FR/DE queries)
+        tokens = re.findall(r"\b\w+\b", text, flags=re.UNICODE)
+        return tokens if tokens else text.split()
 
 
 class IRSystem:
@@ -45,12 +54,14 @@ class IRSystem:
     
     def __init__(self):
         self.model = None  # LaBSE model
+        self.reranker = None  # Cross-encoder reranker (lazy-loaded)
         self.documents = {}  # lang -> {doc_id: full_text}
         self.doc_ids = {}  # lang -> [doc_id1, doc_id2, ...]
         self.bm25_indices = {}  # lang -> BM25Okapi object
         self.doc_embeddings = {}  # lang -> numpy array
         self.best_alphas = {}  # lang -> best alpha from notebook tuning
         self._initialized = False
+        self._reranker_ready = False
         
     def initialize(self):
         """Initialize model and load data (same workflow as notebook)."""
@@ -61,7 +72,7 @@ class IRSystem:
         self.model = SentenceTransformer("sentence-transformers/LaBSE")
         
         print("🔄 Loading documents and building indices for each language...")
-        for lang in LANGUAGES:
+        for lang in DOC_LANGUAGES:
             self._load_language_data(lang)
         
         # Load best alpha values from notebook if available
@@ -184,18 +195,24 @@ class IRSystem:
     
     def _set_default_alphas(self):
         """Set default alpha=0.5 for all languages."""
-        for lang in LANGUAGES:
+        for lang in DOC_LANGUAGES:
             self.best_alphas[lang] = 0.5
         print(f"  Using default α=0.5 for all languages")
     
-    def retrieve(self, query: str, language: str, method: str) -> List[Tuple[str, float, str]]:
+    def retrieve(
+        self,
+        query: str,
+        language: str,
+        method: str,
+        query_language: Optional[str] = None
+    ) -> List[Tuple[str, float, str]]:
         """
         Retrieve documents for a query.
         
         Returns:
             List of (doc_id, score, doc_text) tuples, sorted by score (descending)
         """
-        if language not in LANGUAGES:
+        if language not in DOC_LANGUAGES:
             return [("error", 0, "Error: Language not supported")]
         
         if not self._initialized:
@@ -205,33 +222,44 @@ class IRSystem:
             return [("error", 0, f"Error: No documents loaded for language '{language}'. Check data path.")]
         
         # Route to appropriate method
+        qlang = query_language or language
+
         if method == "Dense only (LaBSE)":
             return self._retrieve_dense(query, language)
         elif method == "BM25 only":
-            return self._retrieve_bm25(query, language)
+            return self._retrieve_bm25(query, language, qlang)
         elif method.startswith("Hybrid"):
-            return self._retrieve_hybrid(query, language)
+            return self._retrieve_hybrid(query, language, qlang)
+        elif method == "Hybrid + Rerank":
+            return self._retrieve_rerank(query, language, qlang)
         else:
             return [("error", 0, "Error: Unknown retrieval method")]
     
-    def _retrieve_bm25(self, query: str, language: str) -> List[Tuple[str, float, str]]:
+    def _retrieve_bm25(self, query: str, language: str, query_language: str) -> List[Tuple[str, float, str]]:
         """BM25 retrieval (same as notebook lines 436-446)."""
         if language not in self.bm25_indices:
             return [("error", 0, "Error: BM25 index not available")]
         
         # Tokenize query (same as notebook)
-        tokenized_query = tokenize(query, language)
+        tokenized_query = tokenize(query, query_language)
         
         # Get BM25 scores (same as notebook)
         bm25 = self.bm25_indices[language]
         scores = np.asarray(bm25.get_scores(tokenized_query), dtype=np.float32)
+
+        # Normalize scores for display (BM25 is unbounded)
+        s_min, s_max = float(scores.min()), float(scores.max())
+        if s_max > s_min:
+            scores_norm = (scores - s_min) / (s_max - s_min)
+        else:
+            scores_norm = scores
         
         # Get top-K (same as notebook)
         top_indices = scores.argsort()[-K:][::-1]
         doc_ids_list = self.doc_ids[language]
         
         results = [
-            (doc_ids_list[idx], float(scores[idx]), self.documents[language][doc_ids_list[idx]])
+            (doc_ids_list[idx], float(scores_norm[idx]), self.documents[language][doc_ids_list[idx]])
             for idx in top_indices
         ]
         return results
@@ -264,7 +292,7 @@ class IRSystem:
         ]
         return results
     
-    def _retrieve_hybrid(self, query: str, language: str) -> List[Tuple[str, float, str]]:
+    def _retrieve_hybrid(self, query: str, language: str, query_language: str) -> List[Tuple[str, float, str]]:
         """
         Hybrid retrieval combining BM25 and Dense (same as notebook lines 1015-1063).
         Uses min-max normalization and learned alpha.
@@ -273,7 +301,7 @@ class IRSystem:
             return [("error", 0, "Error: Hybrid retrieval not available")]
         
         # Get BM25 scores
-        tokenized_query = tokenize(query, language)
+        tokenized_query = tokenize(query, query_language)
         bm25 = self.bm25_indices[language]
         bm25_scores = bm25.get_scores(tokenized_query)
         
@@ -321,12 +349,72 @@ class IRSystem:
         ]
         return results
 
+    def _ensure_reranker(self):
+        """Lazy-load the cross-encoder reranker."""
+        if self._reranker_ready:
+            return
+        print(f"🔄 Loading reranker: {RERANK_MODEL}")
+        self.reranker = CrossEncoder(
+            RERANK_MODEL,
+            device="cpu",
+            max_length=RERANK_MAX_LEN
+        )
+        self._reranker_ready = True
+
+    def _retrieve_rerank(self, query: str, language: str, query_language: str) -> List[Tuple[str, float, str]]:
+        """Hybrid candidate generation + cross-encoder reranking (same idea as notebook)."""
+        if language not in self.bm25_indices or language not in self.doc_embeddings:
+            return [("error", 0, "Error: Reranking not available")]
+
+        # Stage 1: get hybrid candidates (top K_RERANK)
+        tokenized_query = tokenize(query, query_language)
+        bm25 = self.bm25_indices[language]
+        bm25_scores = bm25.get_scores(tokenized_query)
+
+        query_embedding = self.model.encode(
+            query,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+        doc_embeddings = self.doc_embeddings[language]
+        query_emb_2d = query_embedding.reshape(1, -1)
+        dense_scores = cosine_similarity(query_emb_2d, doc_embeddings)[0]
+
+        min_len = min(len(bm25_scores), len(dense_scores))
+        bm25_scores = bm25_scores[:min_len]
+        dense_scores = dense_scores[:min_len]
+
+        bm25_min, bm25_max = bm25_scores.min(), bm25_scores.max()
+        dense_min, dense_max = dense_scores.min(), dense_scores.max()
+        bm25_norm = (bm25_scores - bm25_min) / (bm25_max - bm25_min) if bm25_max > bm25_min else bm25_scores
+        dense_norm = (dense_scores - dense_min) / (dense_max - dense_min) if dense_max > dense_min else dense_scores
+
+        alpha = self.best_alphas.get(language, 0.5)
+        hybrid_scores = alpha * dense_norm + (1 - alpha) * bm25_norm
+
+        doc_ids_list = self.doc_ids[language]
+        top_indices = np.argsort(hybrid_scores)[::-1][:K_RERANK]
+        candidate_ids = [doc_ids_list[idx] for idx in top_indices]
+
+        # Stage 2: rerank candidates with cross-encoder
+        self._ensure_reranker()
+        pairs = [(query, self.documents[language][doc_id]) for doc_id in candidate_ids]
+        ce_scores = self.reranker.predict(pairs, batch_size=8, show_progress_bar=False)
+        ce_scores = np.asarray(ce_scores, dtype=np.float32).flatten()
+
+        order = np.argsort(-ce_scores)[:K]
+        results = [
+            (candidate_ids[i], float(ce_scores[i]), self.documents[language][candidate_ids[i]])
+            for i in order
+        ]
+        return results
+
 
 # Initialize system
 ir_system = IRSystem()
 
 
-def query_interface(query: str, language: str, method: str) -> str:
+def query_interface(query: str, query_language: str, retrieval_setting: str, doc_language: str, method: str) -> str:
     """Gradio interface function."""
     if not query.strip():
         return "⚠️ Please enter a query"
@@ -335,20 +423,39 @@ def query_interface(query: str, language: str, method: str) -> str:
         ir_system.initialize()
     
     try:
-        results = ir_system.retrieve(query, language, method)
+        # Determine doc language based on retrieval setting
+        if retrieval_setting == "Cross-lingual → English docs":
+            doc_language_effective = "en"
+        else:
+            doc_language_effective = doc_language
+
+        results = ir_system.retrieve(
+            query,
+            doc_language_effective,
+            method,
+            query_language=query_language
+        )
         
         # Format output
         alpha_info = ""
-        if method.startswith("Hybrid") and language in ir_system.best_alphas:
-            alpha_info = f" (α={ir_system.best_alphas[language]:.2f})"
+        if method.startswith("Hybrid") and doc_language_effective in ir_system.best_alphas:
+            alpha_info = f" (α={ir_system.best_alphas[doc_language_effective]:.2f})"
         
         output = f"**Query:** {query}\n"
-        output += f"**Method:** {method}{alpha_info} | **Language:** {language.upper()}\n"
+        output += f"**Method:** {method}{alpha_info}\n"
+        output += f"**Query language:** {query_language.upper()} | **Document language:** {doc_language_effective.upper()}\n"
         output += f"**Retrieved {len(results)} documents**\n"
         output += "---\n\n"
         
         if results and results[0][0] == "error":
             return output + results[0][2]
+
+        if method == "BM25 only":
+            max_score = max((s for _, s, _ in results), default=0.0)
+            if max_score <= 0.0:
+                output += "**Note:** BM25 is lexical; cross‑lingual queries often yield near‑zero overlap. Try Dense or Hybrid for cross‑lingual search.\n\n"
+        if retrieval_setting == "Cross-lingual → English docs" and method == "BM25 only":
+            output += "**Note:** BM25 is not suitable for cross‑lingual retrieval; use Dense/Hybrid for meaningful results.\n\n"
         
         for i, (doc_id, score, doc_text) in enumerate(results, 1):
             # Truncate long documents
@@ -372,7 +479,7 @@ def main():
     print("="*70)
     print("📚 Reusing infrastructure from project.ipynb")
     print(f"📊 Same BM25, LaBSE, and Hybrid implementations")
-    print(f"🎯 Evaluated on {MAX_ITEMS} docs/language across {len(LANGUAGES)} languages")
+    print(f"🎯 Evaluated on {MAX_ITEMS} docs/language across {len(DOC_LANGUAGES)} languages")
     print("="*70 + "\n")
     
     # Fixed for Gradio 6.0 - removed theme from Blocks constructor
@@ -391,14 +498,24 @@ def main():
                     lines=3
                 )
             with gr.Column(scale=1):
-                language_dropdown = gr.Dropdown(
-                    choices=LANGUAGES,
+                retrieval_dropdown = gr.Dropdown(
+                    choices=["Monolingual", "Cross-lingual → English docs"],
+                    value="Monolingual",
+                    label="Retrieval setting"
+                )
+                query_language_dropdown = gr.Dropdown(
+                    choices=QUERY_LANGUAGES,
                     value="en",
-                    label="Document Language",
-                    info="Language of documents to search"
+                    label="Query language"
+                )
+                doc_language_dropdown = gr.Dropdown(
+                    choices=DOC_LANGUAGES,
+                    value="en",
+                    label="Document language (monolingual)",
+                    info="Used only in Monolingual mode"
                 )
                 method_dropdown = gr.Dropdown(
-                    choices=["Dense only (LaBSE)", "BM25 only", "Hybrid (α tuned)"],
+                    choices=["Dense only (LaBSE)", "BM25 only", "Hybrid (α tuned)", "Hybrid + Rerank"],
                     value="Dense only (LaBSE)",
                     label="Retrieval Method"
                 )
@@ -413,26 +530,26 @@ def main():
         # Examples from different languages
         gr.Examples(
             examples=[
-                ["What are the health benefits of exercise?", "en", "Dense only (LaBSE)"],
-                ["Wie funktioniert künstliche Intelligenz?", "de", "Hybrid (α tuned)"],
-                ["¿Cuáles son los efectos del cambio climático?", "es", "BM25 only"],
-                ["Comment préparer une recette traditionnelle?", "fr", "Dense only (LaBSE)"],
-                ["什么是机器学习?", "en", "Hybrid (α tuned)"],
+                ["What are the health benefits of exercise?", "en", "Monolingual", "en", "Dense only (LaBSE)"],
+                ["Wie funktioniert künstliche Intelligenz?", "de", "Monolingual", "de", "Hybrid (α tuned)"],
+                ["¿Cuáles son los efectos del cambio climático?", "es", "Monolingual", "es", "BM25 only"],
+                ["Comment préparer une recette traditionnelle?", "fr", "Cross-lingual → English docs", "en", "Dense only (LaBSE)"],
+                ["什么是机器学习?", "zh", "Cross-lingual → English docs", "en", "Hybrid (α tuned)"],
             ],
-            inputs=[query_input, language_dropdown, method_dropdown],
+            inputs=[query_input, query_language_dropdown, retrieval_dropdown, doc_language_dropdown, method_dropdown],
             label="📝 Example Queries"
         )
         
         search_button.click(
             fn=query_interface,
-            inputs=[query_input, language_dropdown, method_dropdown],
+            inputs=[query_input, query_language_dropdown, retrieval_dropdown, doc_language_dropdown, method_dropdown],
             outputs=results_output
         )
         
         # Allow Enter key to trigger search
         query_input.submit(
             fn=query_interface,
-            inputs=[query_input, language_dropdown, method_dropdown],
+            inputs=[query_input, query_language_dropdown, retrieval_dropdown, doc_language_dropdown, method_dropdown],
             outputs=results_output
         )
     
